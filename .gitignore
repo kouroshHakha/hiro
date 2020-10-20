@@ -1,0 +1,9 @@
+.idea/
+.runs/
+.save/
+./wandb/
+*__pycache__
+
+
+*.ppt
+*.pptx
