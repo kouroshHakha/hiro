@@ -8,9 +8,12 @@ import torch
 import torch.nn as nn
 
 
+import time
+
+
 class ActorTD3(nn.Module):
     def __init__(self, state_dim: int, action_dim: int,
-                 action_scale: Union[np.ndarray, torch.Tensor]):
+                 output_scale: Union[np.ndarray, torch.Tensor]):
         super(ActorTD3, self).__init__()
         self.fc = nn.Sequential(
             nn.Linear(state_dim, 300),
@@ -21,10 +24,11 @@ class ActorTD3(nn.Module):
             nn.Tanh()
         )
 
-        if isinstance(action_scale, np.ndarray):
-            self.output_scale = torch.from_numpy(action_scale)
+        if isinstance(output_scale, np.ndarray):
+            self.output_scale = torch.from_numpy(output_scale).float()
         else:
-            self.output_scale = action_scale
+            self.output_scale = output_scale
+        self.output_scale = nn.Parameter(self.output_scale, requires_grad=False)
 
     def forward(self, state: torch.Tensor):
         if state.ndim == 1:
@@ -68,14 +72,14 @@ class CriticTD3(nn.Module):
 
 
 class ActorLow(ActorTD3):
-    def __init__(self, state_dim: int, goal_dim: int, action_dim: int, action_scale: float):
-        scale = torch.tensor([action_scale])
-        super().__init__(state_dim=state_dim + goal_dim, action_dim=action_dim, action_scale=scale)
+    def __init__(self, state_dim: int, goal_dim: int, action_dim: int, output_scale: float):
+        scale = torch.tensor([output_scale])
+        super().__init__(state_dim=state_dim + goal_dim, action_dim=action_dim, output_scale=scale)
 
 
 class ActorHigh(ActorTD3):
     def __init__(self, state_dim: int, goal_dim: int, goal_scale: Union[np.ndarray, torch.Tensor]):
-        super().__init__(state_dim=state_dim, action_dim=goal_dim, action_scale=goal_scale)
+        super().__init__(state_dim=state_dim, action_dim=goal_dim, output_scale=goal_scale)
 
 
 class CriticLow(CriticTD3):

@@ -1,0 +1,2 @@
+env_name,seed,max_timestep,start_timestep,episode_len,batch_size,c,policy_freq,discount,actor_lr,critic_lr,polyak,rew_scaling_lo,rew_scaling_hi,policy_noise_std,policy_noise_clip,expl_noise_std_lo,expl_noise_std_hi,action_scale,replay_buffer_size,save_video,video_interval,checkpoint_interval,evaluation_interval,log_interval,checkpoint,prefix,param_id
+AntFall,0,10000000,100000,1000,32,10,1,0.99,0.0001,0.001,0.995,1.0,0.1,1.0,1.0,1.0,1.0,30,200000,FALSE,50000,10000,50000,100,,,1

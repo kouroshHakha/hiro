@@ -1,9 +1,8 @@
 .idea/
-.runs/
-.save/
-./wandb/
+runs/
+save/
+wandb/
 *__pycache__
-
 
 *.ppt
 *.pptx

@@ -18,6 +18,7 @@ class ReplayTD3(abc.ABC):
                      device: torch.device = torch.device('cpu')) -> BatchT:
         pass
 
+
 class ReplayBufferLo(ReplayTD3):
 
     def __init__(self, obs_dim: int, goal_dim: int, act_dim: int, size: int = 200000):

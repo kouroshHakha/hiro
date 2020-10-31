@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import math
 import numpy as np
 import gym
+import random
 
 from environments import maze_env_utils
 
@@ -485,3 +486,7 @@ class MazeEnv(gym.Env):
         next_obs = self._get_obs()
         done = False
         return next_obs, inner_reward, done, info
+
+    def seed(self, seed=None):
+        self.wrapped_env.seed(seed)
+        random.seed(seed)

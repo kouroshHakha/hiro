@@ -4,13 +4,16 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from environments.create_maze_env import create_maze_env
+
+
 ArrayT =  Union[np.ndarray, Tensor]
 
 def get_goal_scale(env_name: str, use_torch: bool = True,
                    device: torch.device = torch.device('cpu')) -> ArrayT:
     arr = np.array([10., 10., 0.5])
     if use_torch:
-        return torch.from_numpy(arr).to(device)
+        return torch.tensor(arr, dtype=torch.float32).to(device)
     return arr
 
 def get_target_position(env_name: str, use_torch: bool = True,
@@ -46,7 +49,7 @@ def dense_reward(state: ArrayT, target: ArrayT, goal_dim) -> ArrayT:
 def done_judge_low(goal: ArrayT) -> ArrayT:
     # define low-level success: same as high-level success (L2 norm < 5, paper B.2.2)
     l2_norm = ((goal ** 2).sum(-1)) ** 0.5
-    return l2_norm <= 1.5
+    return l2_norm <= 5
 
 def success_judge(state: ArrayT, target: ArrayT, goal_dim: int) -> ArrayT:
     l2_norm = (((state[:goal_dim] - target) ** 2).sum(-1)) ** 0.5
