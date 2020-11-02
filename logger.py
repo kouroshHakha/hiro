@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import os.path as osp, time, atexit, os
 import warnings
+import pandas as pd
 
 color2num = dict(
     gray=30,
@@ -105,12 +106,14 @@ class Logger:
             print("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
         else:
             os.makedirs(self.output_dir)
-        self.output_file = open(osp.join(self.output_dir, output_fname), 'w')
+        self.output_fname = osp.join(self.output_dir, output_fname)
+        self.output_file = open(self.output_fname, 'w')
         atexit.register(self.output_file.close)
         print(colorize("Logging data to %s"%self.output_file.name, 'green', bold=True))
         self.first_row=True
         self.log_headers = []
         self.log_current_row = {}
+        self.log_prev_row = {}
         self.exp_name = exp_name
 
     def log(self, msg, color='green'):
@@ -129,7 +132,21 @@ class Logger:
         if self.first_row:
             self.log_headers.append(key)
         else:
-            assert key in self.log_headers, "Trying to introduce a new key %s that you didn't include in the first iteration"%key
+            if key not in self.log_headers:
+                # add a new field
+                print(f"Trying to introduce a new key {key} that you didn't include in the first iteration")
+                self.output_file.flush()
+                self.output_file.close()
+
+                data = pd.read_table(self.output_fname)
+                data[key] = np.nan
+                self.log_headers.append(key)
+
+                data.to_csv(self.output_fname, index=False, sep='\t', na_rep='')
+
+                self.output_file = open(self.output_fname, 'a+')
+                self.output_file.flush()
+
         assert key not in self.log_current_row, "You already set %s this iteration. Maybe you forgot to call dump_tabular()"%key
         self.log_current_row[key] = val
 
@@ -227,73 +244,60 @@ class Logger:
             torch.save(self.pytorch_saver_elements, fname)
 
 
-    def dump_tabular(self):
+    def dump_tabular(self, std_out: bool = False):
         """
         Write all of the diagnostics from the current iteration.
+        std_out: bool
+            if std_out True, beseide in the outputfile, the result will be shown in stdout too.
 
-        Writes both to stdout, and to the output file.
         """
         vals = []
         key_lens = [len(key) for key in self.log_headers]
+        for key in self.log_headers:
+            if key not in self.log_current_row:
+                self.log_current_row[key] = self.log_prev_row[key]
+
         max_key_len = max(15,max(key_lens))
         keystr = '%'+'%d'%max_key_len
         fmt = "| " + keystr + "s | %15s |"
         n_slashes = 22 + max_key_len
-        print("-"*n_slashes)
+        if std_out:
+            print("-"*n_slashes)
         for key in self.log_headers:
             val = self.log_current_row.get(key, "")
             valstr = "%8.3g"%val if hasattr(val, "__float__") else val
-            print(fmt%(key, valstr))
+            if std_out:
+                print(fmt%(key, valstr))
             vals.append(val)
-        print("-"*n_slashes, flush=True)
+        if std_out:
+            print("-"*n_slashes, flush=True)
         if self.output_file is not None:
             if self.first_row:
                 self.output_file.write("\t".join(self.log_headers)+"\n")
             self.output_file.write("\t".join(map(str,vals))+"\n")
             self.output_file.flush()
+        self.log_prev_row = self.log_current_row.copy()
         self.log_current_row.clear()
         self.first_row=False
 
-class EpochLogger(Logger):
+class VectorLogger(Logger):
     """
-    A variant of Logger tailored for tracking average values over epochs.
+    A variant of Logger tailored for tracking average values over array-like diagnostics.
 
     Typical use case: there is some quantity which is calculated many times
     throughout an epoch, and at the end of the epoch, you would like to
     report the average / std / min / max value of that quantity.
 
-    With an EpochLogger, each time the quantity is calculated, you would
-    use
-
-    .. code-block:: python
-
-        epoch_logger.store(NameOfQuantity=quantity_value)
-
-    to load it into the EpochLogger's state. Then at the end of the epoch, you
-    would use
-
-    .. code-block:: python
-
-        epoch_logger.log_tabular(NameOfQuantity, **options)
-
-    to record the desired values.
+    Two important features:
+    - if user wants to store a new field that it has never stored before and it's not the first row
+    either, we re-structure the table to add the field column and populate the empty slots with NAN
+    - if user uses a less frequent logging for some of the fields, their previous values will be
+    held until they actually change. This allows for logging different quantities that are less
+    frequent that the main time step of the algorithm.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.epoch_dict = dict()
-
-    def store(self, **kwargs):
-        """
-        Save something into the epoch_logger's current state.
-
-        Provide an arbitrary number of keyword arguments with numerical
-        values.
-        """
-        for k,v in kwargs.items():
-            if not(k in self.epoch_dict.keys()):
-                self.epoch_dict[k] = []
-            self.epoch_dict[k].append(v)
 
     def log_tabular(self, key, val=None, with_min_and_max=False, average_only=False):
         """
@@ -314,27 +318,16 @@ class EpochLogger(Logger):
             average_only (bool): If true, do not log the standard deviation
                 of the diagnostic over the epoch.
         """
-        if val is not None:
-            super().log_tabular(key,val)
-        else:
-            v = self.epoch_dict[key]
-            vals = np.concatenate(v) if isinstance(v[0], np.ndarray) and len(v[0].shape)>0 else v
-            stats = self.get_statistics_scalar(vals, with_min_and_max=with_min_and_max)
+        if isinstance(val, (list, np.ndarray)):
+            stats = self.get_statistics_scalar(val, with_min_and_max=with_min_and_max)
             super().log_tabular(key if average_only else 'Average' + key, stats[0])
             if not(average_only):
                 super().log_tabular('Std'+key, stats[1])
             if with_min_and_max:
                 super().log_tabular('Max'+key, stats[3])
                 super().log_tabular('Min'+key, stats[2])
-        self.epoch_dict[key] = []
-
-    def get_stats(self, key):
-        """
-        Lets an algorithm ask the logger for mean/std/min/max of a diagnostic.
-        """
-        v = self.epoch_dict[key]
-        vals = np.concatenate(v) if isinstance(v[0], np.ndarray) and len(v[0].shape)>0 else v
-        return self.get_statistics_scalar(vals)
+        else:
+            super().log_tabular(key,val)
 
     def get_statistics_scalar(self, x,  with_min_and_max=False):
         x = np.array(x, dtype=np.float32)
