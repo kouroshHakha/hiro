@@ -3,6 +3,7 @@ runs/
 save/
 wandb/
 *__pycache__
+.DS_Store
 
 *.ppt
 *.pptx
