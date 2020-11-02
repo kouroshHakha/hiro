@@ -1,11 +1,12 @@
 from typing import List, Tuple, Dict, Any, Optional
 
-
 import torch
 import numpy as np
 import dataclasses
 import wandb
 from pathlib import Path
+from gym.wrappers import Monitor
+from gym.wrappers.monitoring.video_recorder import VideoRecorder
 
 from policy import TD3Policy
 from network import ActorLow, CriticLow, ActorHigh, CriticHi
@@ -15,6 +16,7 @@ from util import (
     get_goal_scale, get_target_position, success_judge, h_function, intrinsic_reward,
     dense_reward, done_judge_low
 )
+from logger import VectorLogger, read_yaml, write_yaml
 
 
 @dataclasses.dataclass
@@ -87,12 +89,10 @@ class Hiro:
     def __init__(self, params: HiroConfig):
         self.params = params
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # self.device = torch.device("cpu")
 
         if params.checkpoint:
             self.params = self.load_checkpoint(params.checkpoint, get_params_only=True)
 
-        wandb.config.update(self.params.state_dict())
 
         self.env = self.params.env
         self.seed = self.params.seed
@@ -163,6 +163,13 @@ class Hiro:
         if params.checkpoint:
             self.load_checkpoint(params.checkpoint)
 
+        root = f'hiro_{self.params.env_name}'
+        if params.prefix:
+            root = f'{root}_{params.prefix}'
+        self.log_dir = Path('runs') / root / f's{self.seed}'
+        self.logger = VectorLogger(output_dir=self.log_dir)
+        self.logger.save_config(self.params.state_dict())
+
 
     def correct_goal(self, init_goal: torch.Tensor, action_seq: List[torch.Tensor],
                      state_seq: List[torch.Tensor],
@@ -195,17 +202,17 @@ class Hiro:
 
         return goal_candidates[index], updated
 
-    def evaluate(self):
+    def evaluate(self, step):
         print("\n    > evaluating policies...")
         success_number = 0
         env = self.env
         nseed = self.params.evaluation_nseeds
         for i in range(nseed):
             env.seed(self.seed + i)
-            done, ep_reward = self._run_episode(render=False)
+            done, ep_reward = self._run_episode(step, render=False)
             if done:
                 success_number += 1
-            print(f"        > evaluated episodes {i} ep_reward = {ep_reward:.3f}")
+            print(f"        > [@{step}] evaluated episodes {i} ep_reward = {ep_reward:.3f}")
         success_rate = success_number / nseed
         print(f"    > finished evaluation, success rate: {success_rate:.2f}\n")
         return success_rate
@@ -222,10 +229,12 @@ class Hiro:
 
         target = self.target.detach().cpu().numpy()
         env = self.env
+        logger = self.logger
 
         # logging and book keeping
         ep_idx, ep_t_idx = self.ep_idx, 0
         ep_reward_l, ep_reward_h = 0, 0
+        best_success_rate = 0
         ep_rews, ep_states, ep_actions, ep_goals = [], [], [], []
         checkpoint_event = False
 
@@ -275,6 +284,17 @@ class Hiro:
 
             ep_reward_l += rew_l
             ep_reward_h += rew_h
+
+            logger.log_tabular('ep_idx', ep_idx)
+            logger.log_tabular('ep_t_idx', ep_t_idx)
+            logger.log_tabular('rew_l', rew_l)
+            logger.log_tabular('done_l', done_l)
+            logger.log_tabular('rew_h', rew_h)
+            logger.log_tabular('done_h', done_h)
+            logger.log_tabular('ep_reward_l', ep_reward_l)
+            logger.log_tabular('ep_reward_h', ep_reward_h)
+            logger.log_tabular('rew_h_accum', rew_h_accum)
+
             ep_t_idx += 1
 
             # Note: I wonder if not adding ep_end to the high level condition makes sense?
@@ -299,7 +319,7 @@ class Hiro:
                 updated_goal = updated_goal.detach().cpu().numpy()
                 state_start = state_seq[0].detach().cpu().numpy()
 
-                wandb.log(dict(rew_h_accum=rew_h_accum), step=t)
+                # wandb.log(dict(rew_h_accum=rew_h_accum), step=t)
                 self.replay_hi.store(state_start, updated_goal, rew_h_accum, next_state, done_h)
 
                 # reset values
@@ -308,6 +328,8 @@ class Hiro:
 
                 # shape is (1 x D)
                 next_goal = next_goal.squeeze(0).detach().cpu().numpy()
+
+                logger.log_tabular('rew_h_accum_sh', rew_h_accum)
 
             # very important, and easy to miss
             state = next_state
@@ -318,13 +340,26 @@ class Hiro:
                 batch = self.replay_lo.sample_batch(bsize, return_tensor=True, device=self.device)
                 low_loss_info = self.agent_lo.step_update(batch, agent_lo_iter % policy_freq == 0)
                 agent_lo_iter += 1
-                wandb.log({'low': low_loss_info}, step=t)
+                # wandb.log({'low': low_loss_info}, step=t)
+                logger.log_tabular('low_q1_val', low_loss_info['q1_val'])
+                logger.log_tabular('low_q2_val', low_loss_info['q2_val'])
+                logger.log_tabular('low_q1_loss', low_loss_info['q1_loss'])
+                logger.log_tabular('low_q2_loss', low_loss_info['q2_loss'])
+                logger.log_tabular('low_q_loss', low_loss_info['q_loss'])
+                if 'pi_loss' in low_loss_info:
+                    logger.log_tabular('low_pi_loss', low_loss_info['pi_loss'])
 
             if t >= start_timestep and (t + 1) % c == 0:
                 batch = self.replay_hi.sample_batch(bsize, return_tensor=True, device=self.device)
                 hi_loss_info = self.agent_hi.step_update(batch, agent_hi_iter % policy_freq == 0)
                 agent_hi_iter += 1
-                wandb.log({'high': hi_loss_info}, step=t)
+                logger.log_tabular('hi_q1_val', hi_loss_info['q1_val'])
+                logger.log_tabular('hi_q2_val', hi_loss_info['q2_val'])
+                logger.log_tabular('hi_q1_loss', hi_loss_info['q1_loss'])
+                logger.log_tabular('hi_q2_loss', hi_loss_info['q2_loss'])
+                logger.log_tabular('hi_q_loss', hi_loss_info['q_loss'])
+                if 'pi_loss' in hi_loss_info:
+                    logger.log_tabular('hi_pi_loss', hi_loss_info['pi_loss'])
 
             # book keeping and evaluation
             if (t + 1) % self.params.log_interval == 0:
@@ -334,7 +369,9 @@ class Hiro:
 
             # at the end of an episode reset env and store episode reward
             if episode_end:
-                wandb.log(dict(ep_reward_l=ep_reward_l, ep_reward_h=ep_reward_h), step=t)
+                # wandb.log(dict(ep_reward_l=ep_reward_l, ep_reward_h=ep_reward_h), step=t)
+                logger.log_tabular('ep_reward_l_sh', ep_reward_l)
+                logger.log_tabular('ep_reward_h_sh', ep_reward_h)
 
                 self.rollouts['states'].append(ep_states)
                 self.rollouts['actions'].append(ep_actions)
@@ -347,8 +384,11 @@ class Hiro:
                 state, goal = self._reset(t)
 
             if (t + 1) % self.params.evaluation_interval == 0 and t >= start_timestep:
-                success_rate = self.evaluate()
-                wandb.log(dict(success_rate=success_rate), step=t)
+                success_rate = self.evaluate(t)
+
+                if success_rate > best_success_rate:
+                    self.save_checkpoint(self.log_dir / 'best_ckpt', t + 1, ep_idx)
+                logger.log_tabular('success_rate', success_rate)
 
             if  self.params.save_video and t % self.params.video_interval == 0 and t >= start_timestep:
                 self.log_video_hrl(t)
@@ -360,49 +400,45 @@ class Hiro:
             if checkpoint_event and episode_end:
                 # should start from the next step when we come in to the loop after loading
                 # ep_idx is already incremented
-                self.save_checkpoint(t + 1, ep_idx)
+                self.save_checkpoint(self.log_dir / 'ckpt', t + 1, ep_idx)
                 checkpoint_event = False
 
+            logger.log_tabular('step', t)
+            logger.dump_tabular()
 
-    def save_checkpoint(self, step, ep_idx):
-        print('skipping checkpoint')
-        return
-        env_name = self.params.env_name.lower()
-        prefix = self.params.prefix
 
-        file_name = f'checkpoint-hiro-{env_name}'
-        if prefix:
-            file_name = f'{file_name}-{prefix}'
-        file_name = f'{file_name}.tar'
-
-        file_path = Path('.') / 'save' / 'model' / file_name
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-
-        save_dict = dict(
-            step=step,
-            ep_idx=ep_idx,
-            params=self.params.state_dict(),
-            rollouts=self.rollouts,
-            actor_lo=self.actor_lo.state_dict(),
-            critic_lo=self.critic_lo.state_dict(),
-            # replay_lo=self.replay_lo,
-            actor_lo_optimizer=self.agent_lo.actor_optim.state_dict(),
-            critic_lo_optimizer=self.agent_lo.critic_optim.state_dict(),
-            actor_hi=self.actor_hi.state_dict(),
-            critic_hi=self.critic_hi.state_dict(),
-            # replay_hi=self.replay_hi,
-            actor_hi_optimizer=self.agent_hi.actor_optim.state_dict(),
-            critic_hi_optimizer=self.agent_hi.critic_optim.state_dict(),
-        )
+    def save_checkpoint(self, ckpt_path, step, ep_idx):
+        print('saving checkpoint ...')
+        ckpt_path.mkdir(parents=True, exist_ok=True)
+        models = ckpt_path / 'models.pt'
+        meta_data = ckpt_path / 'meta.yaml'
+        # replay_lo = ckpt_path / 'replay_lo.pt'
+        # replay_hi = ckpt_path / 'replay_hi.pt'
+        roll_outs = ckpt_path / 'roll_outs.pt'
 
         try:
-            torch.save(save_dict, file_path)
-            print(f"    > saved checkpoint to: {str(file_path)}\n")
+            write_yaml(dict(step=step, ep_idx=ep_idx, params=self.params.state_dict()), meta_data)
+            save_dict = dict(
+                actor_lo=self.actor_lo.state_dict(),
+                critic_lo=self.critic_lo.state_dict(),
+                actor_lo_optimizer=self.agent_lo.actor_optim.state_dict(),
+                critic_lo_optimizer=self.agent_lo.critic_optim.state_dict(),
+                actor_hi=self.actor_hi.state_dict(),
+                critic_hi=self.critic_hi.state_dict(),
+                actor_hi_optimizer=self.agent_hi.actor_optim.state_dict(),
+                critic_hi_optimizer=self.agent_hi.critic_optim.state_dict(),
+            )
+            torch.save(save_dict, models)
+            # torch.save(self.replay_lo, replay_lo)
+            # torch.save(self.replay_hi, replay_hi)
+            torch.save(self.rollouts, roll_outs)
+
         except OSError as e:
             print(e)
 
     def load_checkpoint(self, checkpoint_path: str,
                         get_params_only: bool = False) -> Optional[HiroConfig]:
+        # this loading is deprecated
         if not get_params_only:
             print("\n    > loading training checkpoint...")
         load_dict = torch.load(checkpoint_path, map_location=self.device)
@@ -432,26 +468,36 @@ class Hiro:
         print("    > checkpoint resume success!")
 
 
-    def log_video_hrl(self, t):
+    def log_video_hrl(self, step):
         print('\n    > Collecting current trajectory...')
-        _, ep_reward, frame_buffer = self._run_episode(render=True)
+        _, ep_reward = self._run_episode(step, render=True)
         print(f'    > Finished collection, saved video. Episode reward: {float(ep_reward):.3f}\n')
-        frame_buffer = np.array(frame_buffer).transpose([0, 3, 1, 2])
 
-        wandb.log({"video": wandb.Video(frame_buffer, fps=30, format="mp4")}, step=t)
-
-    def _run_episode(self, render=False):
-        frame_buffer= []
+    def _run_episode(self, step, render=False):
         target = self.target.detach().cpu().numpy()
         t, ep_reward = 0, 0
-        state, done = self.env.reset(), False
 
+        env = self.env
+
+        if render:
+            video_path = self.log_dir / 'video'
+            video_path.mkdir(exist_ok=True, parents=True)
+            video_recorder = VideoRecorder(
+                env=self.env,
+                base_path=str(video_path / f'{step}'),
+                metadata={'step': step},
+                enabled=True,
+            )
+        else:
+            video_recorder = None
+
+        state, done = env.reset(), False
         # extra variables for proper execution (initial value not important)
         goal = None
 
         while not done and t < self.ep_len:
-            if render:
-                frame_buffer.append(self.env.render(mode='rgb_array'))
+            if video_recorder:
+                video_recorder.capture_frame()
             state_tens = torch.from_numpy(state).float().to(self.device)
             # TODO: run episodes exactly like we collect experience
             if t == 0 or (t + 1) % self.params.c == 0:
@@ -459,22 +505,21 @@ class Hiro:
 
             action = self.agent_lo.actor(torch.cat([state_tens, goal], dim=-1)).squeeze(0)
 
-            next_state, _, _, _ = self.env.step(action.detach().cpu().numpy())
+            next_state, _, _, _ = env.step(action.detach().cpu().numpy())
             reward = dense_reward(next_state, target, self.goal_dim)
             done = success_judge(next_state, target, self.goal_dim)
             next_state_tens = torch.from_numpy(next_state).float().to(self.device)
 
             t += 1
+
             ep_reward += reward
             goal = goal + (state_tens - next_state_tens)[:self.goal_dim]
             state = next_state
 
-        if render:
-            return done, ep_reward, frame_buffer
+        if video_recorder:
+            video_recorder.close()
 
         return done, ep_reward
-
-
 
     def _seed(self):
         self.env.seed(self.seed)

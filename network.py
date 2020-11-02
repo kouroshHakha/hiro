@@ -74,6 +74,8 @@ class ActorLow(ActorTD3):
         scale = torch.tensor([output_scale])
         super().__init__(state_dim=state_dim + goal_dim, action_dim=action_dim, output_scale=scale)
 
+    def forward(self, state: torch.Tensor):
+        return super().forward(state) * 30
 
 class ActorHigh(ActorTD3):
     def __init__(self, state_dim: int, goal_dim: int, goal_scale: Union[np.ndarray, torch.Tensor]):

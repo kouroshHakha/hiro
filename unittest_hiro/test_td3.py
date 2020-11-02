@@ -11,7 +11,7 @@ import torch
 import numpy as np
 from pathlib import Path
 
-from unittest_hiro.util import EpochLogger
+from logger import VectorLogger
 from replay import ReplayTD3, BatchT
 from network import ActorTD3, CriticTD3
 from policy import TD3Policy
@@ -118,7 +118,7 @@ class TestTD3:
         )
 
         self.path = Path(f'/tmp/experiments/unittest_hiro/{self.params.env_name}/s{self.seed}')
-        self.logger = EpochLogger(output_dir=str(self.path))
+        self.logger = VectorLogger(output_dir=str(self.path))
 
         # Set up model saving
         self.logger.setup_pytorch_saver(self.actor)

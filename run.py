@@ -3,12 +3,12 @@ CUDA_VISIBLE_DEVICES=1,2 taskset -c 38-48 python run.py --env_name AntPush --max
 """
 import argparse
 import csv
-import wandb
 import os
 
 from debug.cpdb import register_pdb
 
 from hiro import Hiro, HiroConfig
+from logger import VectorLogger
 
 register_pdb()
 
@@ -73,6 +73,5 @@ def load_params(cmd_args: argparse.Namespace) -> HiroConfig:
 if __name__ == '__main__':
     _args = _parse_args()
     params = load_params(_args)
-    wandb.init(project="hiro_ours", dir='/tmp/wandb/hiro_ours')
     hiro = Hiro(params)
     hiro.train()

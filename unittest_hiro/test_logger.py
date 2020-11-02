@@ -49,8 +49,16 @@ class LoggerTester:
 
             logger.dump_tabular()
 
+    def test_empty_log(self):
+        logger = VectorLogger(output_dir='./unittest_out/logger/test_empty_log')
+        for t in range(100):
+            if t > 50:
+                logger.log_tabular('t', t)
+            logger.dump_tabular()
+
 if __name__ == '__main__':
 
     unit = LoggerTester()
+    unit.test_empty_log()
     unit.test_basics()
     unit.test_field_not_in_first_row()

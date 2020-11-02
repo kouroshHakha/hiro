@@ -11,6 +11,7 @@ import torch
 import os.path as osp, time, atexit, os
 import warnings
 import pandas as pd
+import yaml
 
 color2num = dict(
     gray=30,
@@ -103,7 +104,8 @@ class Logger:
         """
         self.output_dir = output_dir or "/tmp/experiments/%i"%int(time.time())
         if osp.exists(self.output_dir):
-            print("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
+            raise ValueError("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
+            # print("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
         else:
             os.makedirs(self.output_dir)
         self.output_fname = osp.join(self.output_dir, output_fname)
@@ -251,6 +253,8 @@ class Logger:
             if std_out True, beseide in the outputfile, the result will be shown in stdout too.
 
         """
+        if not self.log_headers:
+            return
         vals = []
         key_lens = [len(key) for key in self.log_headers]
         for key in self.log_headers:
@@ -337,3 +341,14 @@ class VectorLogger(Logger):
         if with_min_and_max:
             return mean, std, np.min(x), np.max(x)
         return mean, std
+
+
+def write_yaml(data, fpath):
+
+    with open(fpath, 'w') as f:
+        yaml.dump(data, f)
+
+def read_yaml(fpath):
+
+    with open(fpath, 'r') as f:
+        return yaml.load(fpath)

@@ -66,8 +66,8 @@ def plot_states(states):
 if __name__ == '__main__':
     _args = _parse_arg()
 
-    ckpt = torch.load(_args.checkpoint, map_location='cpu')
-    rollouts = ckpt['rollouts']
+    rollouts = torch.load(_args.checkpoint, map_location='cpu')
 
+    breakpoint()
     # plot_actions(rollouts['actions'])
     plot_states(rollouts['states'])

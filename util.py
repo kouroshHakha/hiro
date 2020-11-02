@@ -4,9 +4,6 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from environments.create_maze_env import create_maze_env
-
-
 ArrayT =  Union[np.ndarray, Tensor]
 
 def get_goal_scale(env_name: str, use_torch: bool = True,
