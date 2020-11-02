@@ -65,13 +65,18 @@ class TD3Policy(abc.ABC):
         if update_actor_and_target_nn:
             # Freeze Q-networks so you don't waste computational effort
             # computing gradients for them during the policy learning step.
-            for p in self.q_params:
-                p.requires_grad = False
+            # for p in self.q_params:
+            #     p.requires_grad = False
 
             loss_pi = self._compute_loss_pi(batch)
             self.actor_optim.zero_grad()
             loss_pi.backward()
             self.actor_optim.step()
+
+            # TODO: Found the bug :(. You idiot, you forgot to unfreeze the Q-network
+            # Unfreeze Q-networks so you can optimize it at next step.
+            # for p in self.q_params:
+            #     p.requires_grad = True
 
             # update actor and critic target networks with polyak averaging
             with torch.no_grad():
@@ -113,9 +118,10 @@ class TD3Policy(abc.ABC):
         loss_q2 = ((q2 - backup) ** 2).mean(0)
         loss_q = loss_q1 + loss_q2
 
-        loss_info = dict(q1_loss=loss_q1.item(), q2_loss=loss_q2.item(), q_loss = loss_q.item())
+        info = dict(q1_loss=loss_q1.item(), q2_loss=loss_q2.item(), q_loss = loss_q.item(),
+                    q1_val=q1.mean().item(), q2_val=q2.mean().item())
 
-        return loss_q, loss_info
+        return loss_q, info
 
     def _compute_loss_pi(self, batch: BatchT):
         state, _, _, _, _ = self._parse_batchT(batch)

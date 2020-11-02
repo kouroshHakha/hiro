@@ -49,7 +49,9 @@ def dense_reward(state: ArrayT, target: ArrayT, goal_dim) -> ArrayT:
 def done_judge_low(goal: ArrayT) -> ArrayT:
     # define low-level success: same as high-level success (L2 norm < 5, paper B.2.2)
     l2_norm = ((goal ** 2).sum(-1)) ** 0.5
-    return l2_norm <= 5
+    # Note: not clear in the paper (should look at the code) but code base uses this criteria to
+    # induce early variation in done_l signal
+    return l2_norm <= 1.5
 
 def success_judge(state: ArrayT, target: ArrayT, goal_dim: int) -> ArrayT:
     l2_norm = (((state[:goal_dim] - target) ** 2).sum(-1)) ** 0.5

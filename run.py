@@ -40,6 +40,7 @@ def _parse_args():
     parser.add_argument('--expl_noise_std_hi', type=float, help='low-level policy exploration noise standard deviation')
     parser.add_argument('--action_scale', type=int, help='action boundary')
     parser.add_argument('--replay_buffer_size', type=int, help='The size of the replay buffer for both controllers')
+    parser.add_argument('--evaluation_nseeds', type=int, help='The number of random evaluations at every evaluation_interval time')
     # >> logging params
     parser.add_argument('--save_video', action='store_true', help='whether sample and log episode video intermittently during training')
     parser.add_argument('--video_interval', type=int, help='the interval of logging video')
@@ -72,6 +73,6 @@ def load_params(cmd_args: argparse.Namespace) -> HiroConfig:
 if __name__ == '__main__':
     _args = _parse_args()
     params = load_params(_args)
-    wandb.init(project="hiro_ours")
+    wandb.init(project="hiro_ours", dir='/tmp/wandb/hiro_ours')
     hiro = Hiro(params)
     hiro.train()

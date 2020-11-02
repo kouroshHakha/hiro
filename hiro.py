@@ -45,6 +45,7 @@ class HiroConfig:
     video_interval: int = 50000
     checkpoint_interval: int = 10000
     evaluation_interval: int = 50000
+    evaluation_nseeds: int = 50
     log_interval: int = 100
     checkpoint: str = ''
     prefix: str = ''
@@ -173,7 +174,7 @@ class Hiro:
         mean = (state_seq[-1] - state_seq[0])[:self.goal_dim]
         std = 0.5 * self.goal_scale
         goal_candidates = [init_goal]
-        # TODO: diff (forgot to clamp the new candidates)
+        # Note: Don't forget to clamp the new candidates
         for _ in range(8):
             candidate = torch.randn_like(mean) * std + mean
             candidate = torch.min(torch.max(candidate, -self.goal_scale), self.goal_scale)
@@ -181,7 +182,7 @@ class Hiro:
         goal_candidates += [mean]
 
         loss_goal = []
-        # TODO: Why not just use mean and init_goal, Does this randomization actually play a significant role?
+        # TODO: Why not just use mean and init_goal, Does this extra randomization actually play a significant role?
         for idx, candidate in enumerate(goal_candidates):
             goal_seq = (state_seq[0] - state_seq[:-1])[:, :self.goal_dim] + candidate
             actor_state = torch.cat([state_seq[:-1], goal_seq], dim=-1)
@@ -198,7 +199,7 @@ class Hiro:
         print("\n    > evaluating policies...")
         success_number = 0
         env = self.env
-        nseed = 50
+        nseed = self.params.evaluation_nseeds
         for i in range(nseed):
             env.seed(self.seed + i)
             done, ep_reward = self._run_episode(render=False)
@@ -208,48 +209,6 @@ class Hiro:
         success_rate = success_number / nseed
         print(f"    > finished evaluation, success rate: {success_rate:.2f}\n")
         return success_rate
-
-    def log_video_hrl(self):
-        print('\n    > Collecting current trajectory...')
-        _, ep_reward, frame_buffer = self._run_episode(render=True)
-        print(f'    > Finished collection, saved video. Episode reward: {float(ep_reward):.3f}\n')
-        frame_buffer = np.array(frame_buffer).transpose([0, 3, 1, 2])
-
-        wandb.log({"video": wandb.Video(frame_buffer, fps=30, format="mp4")})
-
-    def _run_episode(self, render=False):
-        frame_buffer= []
-        target = self.target.detach().cpu().numpy()
-        t, ep_reward = 0, 0
-        state, done = self.env.reset(), False
-
-        # extra variables for proper execution (initial value not important)
-        goal = None
-
-        while not done and t < self.ep_len:
-            if render:
-                frame_buffer.append(self.env.render(mode='rgb_array'))
-            state_tens = torch.from_numpy(state).float().to(self.device)
-            # TODO: run episodes exactly like we collect experience
-            if (t + 1) % self.params.c == 0:
-                goal = self.agent_hi.actor(state_tens).squeeze(0)
-
-            action = self.agent_lo.actor(torch.cat([state_tens, goal], dim=-1))
-            next_state, _, _, _ = self.env.step(action.detach().cpu().numpy())
-            reward = dense_reward(next_state, target, self.goal_dim)
-            done = success_judge(next_state, target, self.goal_dim)
-            next_state_tens = torch.from_numpy(next_state).float().to(self.device)
-
-            t += 1
-            ep_reward += reward
-            goal = goal + (state_tens - next_state_tens)[:self.goal_dim]
-            state = next_state
-
-        if render:
-            return done, ep_reward, frame_buffer
-
-        return done, ep_reward
-
 
     def train(self):
 
@@ -283,6 +242,8 @@ class Hiro:
                 lo_state = torch.cat([torch.from_numpy(state).float(),
                                       torch.from_numpy(goal).float()], dim=-1).to(self.device)
                 action = self.agent_lo.actor(lo_state).squeeze(0)
+                # Note: the low level expl noise has a std of expl_noise_lo = 1 while the action
+                # values can be as large as 30, Network initialization is important here.
                 expl_noise = torch.randn_like(action) * expl_noise_lo
                 action = torch.clamp(action + expl_noise, -self.action_scale, self.action_scale)
                 action = action.detach().cpu().numpy()
@@ -312,8 +273,15 @@ class Hiro:
             ep_goals.append(goal)
             ep_rews.append(rew_h)
 
-            # # TODO: I wonder if we add done_h to the high level condition it makes any difference?
-            if (t + 1) % c == 0:
+            ep_reward_l += rew_l
+            ep_reward_h += rew_h
+            ep_t_idx += 1
+
+            # Note: I wonder if not adding ep_end to the high level condition makes sense?
+            # We definitely want to explicitly store the end of an episode for better high
+            # level learning
+            episode_end = ep_t_idx >= self.ep_len or done_h
+            if (t + 1) % c == 0 or episode_end:
                 next_state_tens = torch.from_numpy(next_state).float().to(self.device)
                 if t < start_timestep:
                     next_goal = torch.randn_like(self.goal_scale) * self.goal_scale
@@ -341,24 +309,22 @@ class Hiro:
                 # shape is (1 x D)
                 next_goal = next_goal.squeeze(0).detach().cpu().numpy()
 
+            # very important, and easy to miss
             state = next_state
             goal = next_goal
 
+            # train low and high level
             if t >= start_timestep:
                 batch = self.replay_lo.sample_batch(bsize, return_tensor=True, device=self.device)
-                agent_lo_iter += 1
                 low_loss_info = self.agent_lo.step_update(batch, agent_lo_iter % policy_freq == 0)
+                agent_lo_iter += 1
                 wandb.log({'low': low_loss_info}, step=t)
 
             if t >= start_timestep and (t + 1) % c == 0:
                 batch = self.replay_hi.sample_batch(bsize, return_tensor=True, device=self.device)
-                agent_hi_iter += 1
                 hi_loss_info = self.agent_hi.step_update(batch, agent_hi_iter % policy_freq == 0)
+                agent_hi_iter += 1
                 wandb.log({'high': hi_loss_info}, step=t)
-
-            ep_reward_l += rew_l
-            ep_reward_h += rew_h
-            ep_t_idx += 1
 
             # book keeping and evaluation
             if (t + 1) % self.params.log_interval == 0:
@@ -367,7 +333,6 @@ class Hiro:
                       f'avg_rew_per_step = {avg_rew_per_step:.3f}')
 
             # at the end of an episode reset env and store episode reward
-            episode_end = ep_t_idx >= self.ep_len or done_h
             if episode_end:
                 wandb.log(dict(ep_reward_l=ep_reward_l, ep_reward_h=ep_reward_h), step=t)
 
@@ -381,16 +346,17 @@ class Hiro:
                 ep_idx += 1
                 state, goal = self._reset(t)
 
-            if (t + 1) % self.params.evaluation_interval == 0:
+            if (t + 1) % self.params.evaluation_interval == 0 and t >= start_timestep:
                 success_rate = self.evaluate()
-                wandb.log({'success_rate': success_rate}, step=t)
+                wandb.log(dict(success_rate=success_rate), step=t)
 
-            if t == 0 or (t + 1) % self.params.video_interval == 0 and self.params.save_video:
-                self.log_video_hrl()
+            if  self.params.save_video and t % self.params.video_interval == 0 and t >= start_timestep:
+                self.log_video_hrl(t)
 
             # should save the checkpoint exactly at the end of previous episode
             if not checkpoint_event:
-                checkpoint_event = (t + 1) % self.params.checkpoint_interval == 0
+                checkpoint_event = (t + 1) % self.params.checkpoint_interval == 0 \
+                                   and t >= start_timestep
             if checkpoint_event and episode_end:
                 # should start from the next step when we come in to the loop after loading
                 # ep_idx is already incremented
@@ -399,6 +365,8 @@ class Hiro:
 
 
     def save_checkpoint(self, step, ep_idx):
+        print('skipping checkpoint')
+        return
         env_name = self.params.env_name.lower()
         prefix = self.params.prefix
 
@@ -417,18 +385,21 @@ class Hiro:
             rollouts=self.rollouts,
             actor_lo=self.actor_lo.state_dict(),
             critic_lo=self.critic_lo.state_dict(),
-            replay_lo=self.replay_lo,
+            # replay_lo=self.replay_lo,
             actor_lo_optimizer=self.agent_lo.actor_optim.state_dict(),
             critic_lo_optimizer=self.agent_lo.critic_optim.state_dict(),
             actor_hi=self.actor_hi.state_dict(),
             critic_hi=self.critic_hi.state_dict(),
-            replay_hi=self.replay_hi,
+            # replay_hi=self.replay_hi,
             actor_hi_optimizer=self.agent_hi.actor_optim.state_dict(),
             critic_hi_optimizer=self.agent_hi.critic_optim.state_dict(),
         )
 
-        torch.save(save_dict, file_path)
-        print(f"    > saved checkpoint to: {str(file_path)}\n")
+        try:
+            torch.save(save_dict, file_path)
+            print(f"    > saved checkpoint to: {str(file_path)}\n")
+        except OSError as e:
+            print(e)
 
     def load_checkpoint(self, checkpoint_path: str,
                         get_params_only: bool = False) -> Optional[HiroConfig]:
@@ -444,7 +415,7 @@ class Hiro:
 
         self.step = load_dict['step']
         self.ep_idx = load_dict['ep_idx']
-        self.rollouts = load_dict['rollouts']
+        # self.rollouts = load_dict['rollouts']
 
         self.actor_lo.load_state_dict(load_dict['actor_lo'])
         self.critic_lo.load_state_dict(load_dict['critic_lo'])
@@ -460,20 +431,49 @@ class Hiro:
 
         print("    > checkpoint resume success!")
 
-    def _compute_goal_seq(self, init_goal: torch.Tensor,
-                          state_sequence: torch.Tensor) -> torch.Tensor:
-        # state ~ (C x sdim), goal_seq ~ (C x goal_dim)
-        goal_seq: List[torch.Tensor] = [init_goal]
-        for next_state, prev_state in zip(state_sequence[1:], state_sequence[:-1]):
-            cur_goal = (prev_state - next_state)[:self.goal_dim] + goal_seq[-1]
-            goal_seq.append(cur_goal)
 
-        # sanity check
-        if len(goal_seq) != len(state_sequence):
-            raise ValueError(f'goal sequence length mismatch with state sequence, '
-                             f'{len(goal_seq)} != {len(state_sequence)}')
+    def log_video_hrl(self, t):
+        print('\n    > Collecting current trajectory...')
+        _, ep_reward, frame_buffer = self._run_episode(render=True)
+        print(f'    > Finished collection, saved video. Episode reward: {float(ep_reward):.3f}\n')
+        frame_buffer = np.array(frame_buffer).transpose([0, 3, 1, 2])
 
-        return torch.stack(goal_seq, dim=0)
+        wandb.log({"video": wandb.Video(frame_buffer, fps=30, format="mp4")}, step=t)
+
+    def _run_episode(self, render=False):
+        frame_buffer= []
+        target = self.target.detach().cpu().numpy()
+        t, ep_reward = 0, 0
+        state, done = self.env.reset(), False
+
+        # extra variables for proper execution (initial value not important)
+        goal = None
+
+        while not done and t < self.ep_len:
+            if render:
+                frame_buffer.append(self.env.render(mode='rgb_array'))
+            state_tens = torch.from_numpy(state).float().to(self.device)
+            # TODO: run episodes exactly like we collect experience
+            if t == 0 or (t + 1) % self.params.c == 0:
+                goal = self.agent_hi.actor(state_tens).squeeze(0)
+
+            action = self.agent_lo.actor(torch.cat([state_tens, goal], dim=-1)).squeeze(0)
+
+            next_state, _, _, _ = self.env.step(action.detach().cpu().numpy())
+            reward = dense_reward(next_state, target, self.goal_dim)
+            done = success_judge(next_state, target, self.goal_dim)
+            next_state_tens = torch.from_numpy(next_state).float().to(self.device)
+
+            t += 1
+            ep_reward += reward
+            goal = goal + (state_tens - next_state_tens)[:self.goal_dim]
+            state = next_state
+
+        if render:
+            return done, ep_reward, frame_buffer
+
+        return done, ep_reward
+
 
 
     def _seed(self):
@@ -488,9 +488,8 @@ class Hiro:
         state = self.env.reset()
 
         if t < self.params.start_timestep:
-            # TODO: diff
-            # goal = np.random.randn(self.goal_dim) * goal_scale
-            goal = np.random.randn(self.goal_dim)
+            # Note: the code base does not scale goal to goal_scale
+            goal = np.random.randn(self.goal_dim) * goal_scale
             # clip goal to the scale
             goal = np.clip(goal, -goal_scale, goal_scale)
         else:

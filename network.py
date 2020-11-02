@@ -8,8 +8,6 @@ import torch
 import torch.nn as nn
 
 
-import time
-
 
 class ActorTD3(nn.Module):
     def __init__(self, state_dim: int, action_dim: int,
